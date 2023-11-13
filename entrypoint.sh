@@ -234,7 +234,7 @@ then
 fi
 
 # create local git tag
-git tag "$new"
+git tag -f -a -m "Bumped to a new tag in action: $new" "$new"
 
 # push new tag ref to github
 dt=$(date '+%Y-%m-%dT%H:%M:%SZ')
