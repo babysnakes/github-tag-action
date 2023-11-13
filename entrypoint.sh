@@ -10,6 +10,7 @@ release_branches=${RELEASE_BRANCHES:-master,main}
 custom_tag=${CUSTOM_TAG:-}
 source=${SOURCE:-.}
 dryrun=${DRY_RUN:-false}
+git_api_tagging=${GIT_API_TAGGING:-true}
 initial_version=${INITIAL_VERSION:-0.0.0}
 tag_context=${TAG_CONTEXT:-repo}
 prerelease=${PRERELEASE:-false}
@@ -35,6 +36,7 @@ echo -e "\tRELEASE_BRANCHES: ${release_branches}"
 echo -e "\tCUSTOM_TAG: ${custom_tag}"
 echo -e "\tSOURCE: ${source}"
 echo -e "\tDRY_RUN: ${dryrun}"
+echo -e "\tGIT_API_TAGGING: ${git_api_tagging}"
 echo -e "\tINITIAL_VERSION: ${initial_version}"
 echo -e "\tTAG_CONTEXT: ${tag_context}"
 echo -e "\tPRERELEASE: ${prerelease}"
@@ -80,19 +82,24 @@ git fetch --tags
 tagFmt="^v?[0-9]+\.[0-9]+\.[0-9]+$"
 preTagFmt="^v?[0-9]+\.[0-9]+\.[0-9]+(-$suffix\.[0-9]+)$"
 
-# get latest tag that looks like a semver (with or without v)
+# get the git refs
+git_refs=
 case "$tag_context" in
-    *repo*) 
-        tag="$(git for-each-ref --sort=-v:refname --format '%(refname:lstrip=2)' | (grep -E "$tagFmt" || true) | head -n 1)"
-        pre_tag="$(git for-each-ref --sort=-v:refname --format '%(refname:lstrip=2)' | (grep -qs -E "$preTagFmt" || true) | head -n 1)"
+    *repo*)
+        git_refs=$(git for-each-ref --sort=-v:refname --format '%(refname:lstrip=2)')
         ;;
-    *branch*) 
-        tag="$(git tag --list --merged HEAD --sort=-v:refname | (grep -E "$tagFmt" || true) | head -n 1)"
-        pre_tag="$(git tag --list --merged HEAD --sort=-v:refname | (grep -qs -E "$preTagFmt" || true) | head -n 1)"
+    *branch*)
+        git_refs=$(git tag --list --merged HEAD --sort=-committerdate)
         ;;
     * ) echo "Unrecognised context"
         exit 1;;
 esac
+
+# get the latest tag that looks like a semver (with or without v)
+matching_tag_refs=$( (grep -E "$tagFmt" <<< "$git_refs") || true)
+matching_pre_tag_refs=$( (grep -E "$preTagFmt" <<< "$git_refs") || true)
+tag=$(head -n 1 <<< "$matching_tag_refs")
+pre_tag=$(head -n 1 <<< "$matching_pre_tag_refs")
 
 # if there are none, start tags at INITIAL_VERSION
 if [ -z "$tag" ]
@@ -142,7 +149,7 @@ then
 fi
 
 # get the merge commit message looking for #bumps
-declare -A history_type=( 
+declare -A history_type=(
     ["last"]="$(git show -s --format=%B)" \
     ["full"]="$(git log "${default_branch}"..HEAD --format=%B)" \
     ["compare"]="$(git log "${tag_commit}".."${commit}" --format=%B)" \
@@ -154,14 +161,14 @@ case "$log" in
     *$major_string_token* ) new=$(semver -i major "$tag"); part="major";;
     *$minor_string_token* ) new=$(semver -i minor "$tag"); part="minor";;
     *$patch_string_token* ) new=$(semver -i patch "$tag"); part="patch";;
-    *$none_string_token* ) 
+    *$none_string_token* )
         echo "Default bump was set to none. Skipping..."
         setOutput "old_tag" "$tag"
         setOutput "new_tag" "$tag"
         setOutput "tag" "$tag"
         setOutput "part" "$default_semvar_bump"
         exit 0;;
-    * ) 
+    * )
         if [ "$default_semvar_bump" == "none" ]
         then
             echo "Default bump was set to none. Skipping..."
@@ -169,11 +176,11 @@ case "$log" in
             setOutput "new_tag" "$tag"
             setOutput "tag" "$tag"
             setOutput "part" "$default_semvar_bump"
-            exit 0 
-        else 
+            exit 0
+        else
             new=$(semver -i "${default_semvar_bump}" "$tag")
-            part=$default_semvar_bump 
-        fi 
+            part=$default_semvar_bump
+        fi
         ;;
 esac
 
@@ -235,35 +242,42 @@ then
     exit 0
 fi
 
+echo "EVENT: creating local tag $new"
 # create local git tag
-git tag -f -a -m "Bumped to a new tag in action: $new" "$new"
+git tag -f -a -m "Bumped to a new tag in action: $new" "$new" || exit 1
+echo "EVENT: pushing tag $new to origin"
 
-# push new tag ref to github
-dt=$(date '+%Y-%m-%dT%H:%M:%SZ')
-full_name=$GITHUB_REPOSITORY
-git_refs_url=$(jq .repository.git_refs_url "$GITHUB_EVENT_PATH" | tr -d '"' | sed 's/{\/sha}//g')
+if $git_api_tagging
+then
+    # use git api to push
+    dt=$(date '+%Y-%m-%dT%H:%M:%SZ')
+    full_name=$GITHUB_REPOSITORY
+    git_refs_url=$(jq .repository.git_refs_url "$GITHUB_EVENT_PATH" | tr -d '"' | sed 's/{\/sha}//g')
 
-echo "$dt: **pushing tag $new to repo $full_name"
+    echo "$dt: **pushing tag $new to repo $full_name"
 
-git_refs_response=$(
-curl -s -X POST "$git_refs_url" \
--H "Authorization: token $GITHUB_TOKEN" \
--d @- << EOF
-
+    git_refs_response=$(
+    curl -s -X POST "$git_refs_url" \
+    -H "Authorization: token $GITHUB_TOKEN" \
+    -d @- << EOF
 {
-  "ref": "refs/tags/$new",
-  "sha": "$commit"
+    "ref": "refs/tags/$new",
+    "sha": "$commit"
 }
 EOF
 )
 
-git_ref_posted=$( echo "${git_refs_response}" | jq .ref | tr -d '"' )
+    git_ref_posted=$( echo "${git_refs_response}" | jq .ref | tr -d '"' )
 
-echo "::debug::${git_refs_response}"
-if [ "${git_ref_posted}" = "refs/tags/${new}" ]
-then
-    exit 0
+    echo "::debug::${git_refs_response}"
+    if [ "${git_ref_posted}" = "refs/tags/${new}" ]
+    then
+        exit 0
+    else
+        echo "::error::Tag was not created properly."
+        exit 1
+    fi
 else
-    echo "::error::Tag was not created properly."
-    exit 1
+    # use git cli to push
+    git push -f origin "$new" || exit 1
 fi

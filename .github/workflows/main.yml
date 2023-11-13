@@ -15,6 +15,8 @@ jobs:
   bump-version:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v3
         with:
@@ -26,6 +28,7 @@ jobs:
         env:
           VERBOSE: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_API_TAGGING: false # uses git cli
 
       # auto releases is not working atm and is deleting releases due branch tags
       - name: automatic-draft-release
